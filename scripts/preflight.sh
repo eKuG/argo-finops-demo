@@ -19,6 +19,12 @@ am=$(curl -s --max-time 3 http://localhost:30093/api/v2/alerts | jq 'length' 2>/
 pr=$(curl -s 'http://localhost:30300/api/v1/repos/finops/gitops/pulls?state=open' | jq length); [ "$pr" = 0 ] && ok "no open PRs" || bad "$pr open PRs (make reset)"
 wf=$(kubectl -n argo get wf --no-headers 2>/dev/null | grep -vc preview-ttl); [ "$wf" = 0 ] && ok "no rightsize workflows" || bad "$wf leftover workflows (make reset)"
 es=$(kubectl -n argo-events get pods --no-headers | grep -cE 'eventsource|sensor'); [ "$es" = 2 ] && ok "eventsource + sensor pods" || bad "events pods: $es/2"
+# every demo image must already be on the kind node, or an offline pod restart turns into ImagePullBackOff on stage
+nodeimgs=$(docker exec finops-control-plane crictl images -o json 2>/dev/null | jq -r '.images[].repoTags[]?')
+missing=0; for i in $(cat images-*.txt | grep -v '^#' | grep -v '^$'); do ref=$i; case "$i" in */*) ;; *) ref="docker.io/library/$i";; esac; case "$i" in natsio/*|alpine/*) ref="docker.io/$i";; esac; echo "$nodeimgs" | grep -qx "$ref" || { missing=$((missing+1)); printf '       missing on node: %s\n' "$i"; }; done
+[ "$missing" = 0 ] && ok "all $(cat images-*.txt | grep -cv '^#') demo images present on the kind node" || bad "$missing images missing on the node (make pull && make up reloads them)"
+hostmissing=0; for i in $(cat images-*.txt | grep -v '^#' | grep -v '^$'); do docker image inspect "$i" >/dev/null 2>&1 || hostmissing=$((hostmissing+1)); done
+[ "$hostmissing" = 0 ] && ok "all demo images cached in host Docker (survives make down)" || printf '  NOTE %s images not in host Docker: a rebuild would need network (make pull)\n' "$hostmissing"
 pmset -g | grep -q 'sleep.*0' || printf '  NOTE caffeinate -dims not detected; run it before the talk\n'
 mem=$(docker stats --no-stream --format '{{.MemUsage}}' finops-control-plane 2>/dev/null); printf '  INFO kind node memory %s\n' "$mem"
 [ $FAILED = 0 ] && echo "PREFLIGHT OK" || { echo "PREFLIGHT FAILED"; exit 1; }

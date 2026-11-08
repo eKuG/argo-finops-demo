@@ -78,6 +78,7 @@ scripts/               up.sh, reset.sh, pull-images.sh, fake-alert.json
 
 - Rehearse offline without touching the laptop's Wi-Fi: `make netcut-on` inserts iptables **and ip6tables** rules on the kind node that reject every new outbound connection except cluster/docker subnets; `make netcut-probe` proves it (an uncached `crictl pull` must fail). Docker Desktop gives the node a routable IPv6 default route, so a v4-only cut is silently bypassed. `make netcut-off` removes the rules; a Docker restart also clears them.
 
+- **If Docker Desktop was reset or updated, the image cache is gone**: `make pull` (network) before `make up`. `scripts/preflight.sh` now fails if any demo image is missing on the kind node, and notes if the host cache is incomplete.
 - Argo CD and Argo Events manifests default to `imagePullPolicy: Always`; `up.sh` rewrites them and sets `IMAGE_PULL_POLICY=IfNotPresent` on the Events controller.
 - Never use digest-pinned image refs (`@sha256:`); `kind load` rewrites digests. OpenCost values override the chart default.
 - Gitea runs with `OFFLINE_MODE`, no gravatar, no update checker. Docker Desktop: Resource Saver off; run `caffeinate -dims` during the talk.
