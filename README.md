@@ -72,6 +72,7 @@ scripts/               up.sh, reset.sh, pull-images.sh, fake-alert.json
 - Alertmanager keeps a fired alert in memory; `repeat_interval: 1h` means re-applying the rule within the hour sends **no new webhook**. `make reset` restarts Alertmanager for exactly this reason. Fallbacks: `make demo-fake`, `make demo-submit`.
 - OpenCost API from the laptop goes through the UI proxy: `curl 'localhost:30091/model/allocation/compute?window=10m&aggregate=namespace'`.
 - Prices: $0.04/core-h, $0.005/GiB-h (values/opencost.yaml). shop at baseline ≈ **$186/mo**, after rightsizing ≈ **$5/mo** (3 × 50m / 64Mi).
+- **Before going on stage, open every tab once in the browser you will present from**: log in to Argo CD (admin / finops-demo-2026) and dismiss the Argo Workflows UI first-visit survey modal ("Tell us what you want to use Argo for"). Both remember it per browser profile.
 - `BOOKMARKS.md` has the tab order and pre-encoded Prometheus graph URLs. `scripts/preflight.sh` is the 10-minutes-before check.
 
 ## Offline notes
