@@ -1,0 +1,25 @@
+# Alertmanager has no native EventSource; the generic webhook is the right tool. Alertmanager POSTs here.
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: alertmanager
+  namespace: argo-events
+spec:
+  service:
+    ports: [{ port: 12000, targetPort: 12000 }]
+  webhook:
+    alerts:
+      port: "12000"
+      endpoint: /alerts
+      method: POST
+---
+# Same pods, reachable from the laptop for the manual fallback: curl -XPOST localhost:30120/alerts -d @fake-alert.json
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager-eventsource-nodeport
+  namespace: argo-events
+spec:
+  type: NodePort
+  selector: { eventsource-name: alertmanager }
+  ports: [{ port: 12000, targetPort: 12000, nodePort: 30120 }]

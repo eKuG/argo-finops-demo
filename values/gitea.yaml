@@ -1,0 +1,26 @@
+# Gitea in-cluster: the Git server, the PR UI, and the "Slack" (issues). sqlite + memory, fully offline.
+image: { tag: "1.27.0", rootless: true }   # chart appends -rootless itself
+strategy: { type: Recreate }   # one RWO PVC + leveldb queue lock: a RollingUpdate second pod can never start
+postgresql-ha: { enabled: false }
+postgresql: { enabled: false }
+valkey-cluster: { enabled: false }
+valkey: { enabled: false }
+test: { enabled: false }
+persistence: { enabled: true, size: 1Gi, annotations: {} }
+service:
+  http: { type: NodePort, port: 3000, clusterIP: "", nodePort: 30300 }
+  ssh: { type: ClusterIP, port: 22, clusterIP: "" }
+gitea:
+  admin: { username: finops, password: finops-demo-2026, email: finops@example.com, passwordMode: keepUpdated }
+  config:
+    server: { ROOT_URL: "http://localhost:30300/", PUBLIC_URL_DETECTION: legacy, OFFLINE_MODE: true, SSH_LISTEN_PORT: 2222 }   # legacy = always build links from ROOT_URL, not the request Host
+    database: { DB_TYPE: sqlite3 }
+    session: { PROVIDER: memory }
+    cache: { ADAPTER: memory }
+    queue: { TYPE: level }
+    picture: { DISABLE_GRAVATAR: true, ENABLE_FEDERATED_AVATAR: false }
+    cron.update_checker: { ENABLED: false }
+    webhook: { ALLOWED_HOST_LIST: private }
+    security: { INSTALL_LOCK: true }
+    service: { DISABLE_REGISTRATION: true }
+    repository: { DEFAULT_BRANCH: main }

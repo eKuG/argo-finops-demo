@@ -1,0 +1,47 @@
+# One firing alert -> one rightsize Workflow. The event may only set parameters (workflowTemplateRef), never templates.
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: rightsize-on-alert
+  namespace: argo-events
+spec:
+  template:
+    serviceAccountName: operate-workflow-sa
+  dependencies:
+    - name: alert
+      eventSourceName: alertmanager
+      eventName: alerts
+      filters:
+        dataLogicalOperator: and
+        data:
+          - { path: body.status, type: string, value: ["firing"] }
+          - { path: body.alerts.0.labels.alertname, type: string, value: ["OverProvisioned"] }
+  triggers:
+    - template:
+        name: submit-rightsize
+        argoWorkflow:
+          operation: submit
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: rightsize-
+                namespace: argo
+                labels: { finops/trigger: alertmanager }
+              spec:
+                workflowTemplateRef: { name: rightsize }
+                arguments:
+                  parameters:
+                    - { name: namespace, value: "" }
+                    - { name: workload, value: "" }
+                    - { name: fingerprint, value: "" }
+          parameters:
+            - src: { dependencyName: alert, dataKey: body.alerts.0.labels.namespace }
+              dest: spec.arguments.parameters.0.value
+            - src: { dependencyName: alert, dataKey: body.alerts.0.labels.container }
+              dest: spec.arguments.parameters.1.value
+            - src: { dependencyName: alert, dataKey: body.alerts.0.fingerprint, value: "manual" }
+              dest: spec.arguments.parameters.2.value
+      rateLimit: { unit: Minute, requestsPerUnit: 5 }
+      retryStrategy: { steps: 3, duration: 2s, factor: 2.0 }

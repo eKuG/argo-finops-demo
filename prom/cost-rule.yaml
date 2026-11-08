@@ -1,0 +1,29 @@
+# The cost guardrail. Loaded once at install; opt-in per namespace with `kubectl label ns <ns> finops-guard=on`.
+# A container is over-provisioned when it uses <10% of its CPU request (and requests at least half a core).
+# Demo timing from the label: KSM scrape ≤15 s + eval ≤15 s + `for` 30 s + group_wait 5 s ≈ 50-65 s to the webhook.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: overprovisioned
+  namespace: monitoring
+spec:
+  groups:
+    - name: finops
+      rules:
+        - alert: OverProvisioned
+          expr: |
+            (
+              sum by (namespace, container) (rate(container_cpu_usage_seconds_total{container!="", image!=""}[2m]))
+              /
+              sum by (namespace, container) (kube_pod_container_resource_requests{resource="cpu"})
+            ) < 0.10
+            and
+            sum by (namespace, container) (kube_pod_container_resource_requests{resource="cpu"}) > 0.5
+            and on (namespace)
+            kube_namespace_labels{label_finops_guard="on"}
+          for: 30s
+          labels:
+            severity: cost
+            finops_action: rightsize
+          annotations:
+            summary: "{{ $labels.namespace }}/{{ $labels.container }} uses {{ $value | humanizePercentage }} of its CPU request"

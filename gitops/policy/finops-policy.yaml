@@ -1,0 +1,13 @@
+# Policy as data, delivered by Argo CD like everything else. The workflow reads it; the bot has no opinions of its own.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: finops-policy
+  namespace: argo
+data:
+  freeze: "payments"        # comma-separated namespaces under change freeze: never open rightsizing PRs
+  minCPU: "50"              # millicores floor for any recommendation
+  minMemoryMi: "64"
+  headroom: "1.5"           # multiplier on observed peak
+  minChangePct: "15"        # deadband: skip if the change is smaller than this
+  autoMerge: ""             # comma-separated namespaces where the approve step is skipped (e.g. "dev,preview")

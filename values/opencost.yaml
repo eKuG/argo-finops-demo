@@ -1,0 +1,30 @@
+# OpenCost on kind: no cloud provider, prices from the custom pricing ConfigMap. Visual credibility only; the workflow has a fallback price.
+service:
+  type: NodePort
+  nodePort: 30091   # applies to the UI port
+opencost:
+  exporter:
+    defaultClusterId: kind-finops
+    image: { registry: ghcr.io, repository: opencost/opencost, tag: "1.121.3" }   # no @sha256: digest pins break `kind load`
+    resources: { requests: { cpu: 10m, memory: 55Mi }, limits: { cpu: 999m, memory: 1Gi } }
+  ui:
+    enabled: true
+    image: { registry: ghcr.io, repository: opencost/opencost-ui, tag: "1.121.3" }
+  prometheus:
+    internal: { enabled: true, serviceName: kps-prometheus, namespaceName: monitoring, port: 9090 }
+  customPricing:
+    enabled: true
+    costModel:
+      description: "Demo on-prem rates ($/vCPU-hour, $/GB-hour)"
+      CPU: 0.04
+      spotCPU: 0.01
+      RAM: 0.005
+      spotRAM: 0.001
+      GPU: 0
+      storage: 0.00005
+      zoneNetworkEgress: 0
+      regionNetworkEgress: 0
+      internetNetworkEgress: 0
+  metrics:
+    serviceMonitor: { enabled: true, scrapeInterval: 15s }   # Prometheus must scrape OpenCost's own /metrics or allocation = $0
+    kubeStateMetrics: { emitKsmV1Metrics: false, emitKsmV1MetricsOnly: true }

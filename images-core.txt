@@ -1,0 +1,15 @@
+quay.io/argoproj/argocd:v3.5.6
+public.ecr.aws/docker/library/redis:8.2.3-alpine
+ghcr.io/dexidp/dex:v2.45.1
+quay.io/argoproj/workflow-controller:v4.1.6
+quay.io/argoproj/argocli:v4.1.6
+quay.io/argoproj/argoexec:v4.1.6
+quay.io/argoproj/argo-events:v1.9.11
+nats:2.10.29
+natsio/prometheus-nats-exporter:0.14.0
+natsio/nats-server-config-reloader:0.14.0
+ghcr.io/opencost/opencost:1.121.3
+ghcr.io/opencost/opencost-ui:1.121.3
+docker.gitea.com/gitea:1.27.0-rootless
+alpine/k8s:1.36.6
+nginx:1.27-alpine

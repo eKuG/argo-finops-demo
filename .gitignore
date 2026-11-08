@@ -1,0 +1,4 @@
+.local/
+.local-up.log
+*.tar
+.DS_Store

@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gitea-gitops
+  namespace: argocd
+  labels: { argocd.argoproj.io/secret-type: repository }
+stringData:
+  type: git
+  url: http://gitea-http.gitea.svc:3000/finops/gitops.git
+  username: finops
+  password: finops-demo-2026
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: shop
+  namespace: argocd
+spec:
+  project: default
+  source: { repoURL: http://gitea-http.gitea.svc:3000/finops/gitops.git, targetRevision: main, path: apps/shop }
+  destination: { server: https://kubernetes.default.svc, namespace: shop }
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true]
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: payments
+  namespace: argocd
+spec:
+  project: default
+  source: { repoURL: http://gitea-http.gitea.svc:3000/finops/gitops.git, targetRevision: main, path: apps/payments }
+  destination: { server: https://kubernetes.default.svc, namespace: payments }
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true]
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: finops-policy
+  namespace: argocd
+spec:
+  project: default
+  source: { repoURL: http://gitea-http.gitea.svc:3000/finops/gitops.git, targetRevision: main, path: policy }
+  destination: { server: https://kubernetes.default.svc, namespace: argo }
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }

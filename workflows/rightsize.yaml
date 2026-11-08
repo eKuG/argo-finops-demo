@@ -1,0 +1,309 @@
+# The loop: measure -> policy -> open-pr -> approve -> merge. Argo CD does the rest.
+# Guardrails are native fields: mutex per workload, deadline (stale approvals expire), onExit notify,
+# workflowTemplateRef (the event may only set parameters), floors/headroom/deadband from the policy ConfigMap.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: rightsize
+  namespace: argo
+spec:
+  serviceAccountName: finops
+  entrypoint: main
+  onExit: notify
+  activeDeadlineSeconds: 3600          # wall clock, including time spent suspended: an unapproved PR run expires
+  ttlStrategy: { secondsAfterCompletion: 86400 }
+  synchronization:
+    mutexes:
+      - name: "rightsize-{{workflow.parameters.namespace}}-{{workflow.parameters.workload}}"
+  arguments:
+    parameters:
+      - { name: namespace }
+      - { name: workload }
+      - { name: fingerprint, value: manual }
+      - { name: window, value: 10m }
+      - { name: prom, value: http://kps-prometheus.monitoring.svc:9090 }
+      - { name: gitea, value: http://gitea-http.gitea.svc:3000 }
+      - { name: repo, value: finops/gitops }
+  templates:
+    - name: main
+      steps:
+        - - name: measure
+            template: measure
+        - - name: policy
+            template: policy
+            arguments:
+              parameters:
+                - { name: cur_cpu_m, value: "{{steps.measure.outputs.parameters.cur_cpu_m}}" }
+                - { name: rec_cpu_m, value: "{{steps.measure.outputs.parameters.rec_cpu_m}}" }
+                - { name: change_pct, value: "{{steps.measure.outputs.parameters.change_pct}}" }
+                - { name: blocked, value: "{{steps.measure.outputs.parameters.blocked}}" }
+                - { name: reason_in, value: "{{steps.measure.outputs.parameters.reason}}" }
+        - - name: block
+            template: block
+            when: "{{steps.policy.outputs.parameters.decision}} == BLOCKED"
+            arguments:
+              parameters:
+                - { name: reason, value: "{{steps.policy.outputs.parameters.reason}}" }
+          - name: propose
+            template: propose
+            when: "{{steps.policy.outputs.parameters.decision}} == OPEN_PR"
+            arguments:
+              parameters:
+                - { name: cur_cpu_m, value: "{{steps.measure.outputs.parameters.cur_cpu_m}}" }
+                - { name: rec_cpu_m, value: "{{steps.measure.outputs.parameters.rec_cpu_m}}" }
+                - { name: cur_mem_mi, value: "{{steps.measure.outputs.parameters.cur_mem_mi}}" }
+                - { name: rec_mem_mi, value: "{{steps.measure.outputs.parameters.rec_mem_mi}}" }
+                - { name: peak_cpu_m, value: "{{steps.measure.outputs.parameters.peak_cpu_m}}" }
+                - { name: peak_mem_mi, value: "{{steps.measure.outputs.parameters.peak_mem_mi}}" }
+                - { name: replicas, value: "{{steps.measure.outputs.parameters.replicas}}" }
+                - { name: savings, value: "{{steps.measure.outputs.parameters.savings}}" }
+                - { name: policy_note, value: "{{steps.policy.outputs.parameters.note}}" }
+
+    # PR -> human approval -> merge. Separate template so a deadband SKIP never references a skipped step's outputs.
+    - name: propose
+      inputs:
+        parameters: [{ name: cur_cpu_m }, { name: rec_cpu_m }, { name: cur_mem_mi }, { name: rec_mem_mi }, { name: peak_cpu_m }, { name: peak_mem_mi }, { name: replicas }, { name: savings }, { name: policy_note }]
+      steps:
+        - - name: open-pr
+            template: open-pr
+            arguments:
+              parameters:
+                - { name: cur_cpu_m, value: "{{inputs.parameters.cur_cpu_m}}" }
+                - { name: rec_cpu_m, value: "{{inputs.parameters.rec_cpu_m}}" }
+                - { name: cur_mem_mi, value: "{{inputs.parameters.cur_mem_mi}}" }
+                - { name: rec_mem_mi, value: "{{inputs.parameters.rec_mem_mi}}" }
+                - { name: peak_cpu_m, value: "{{inputs.parameters.peak_cpu_m}}" }
+                - { name: peak_mem_mi, value: "{{inputs.parameters.peak_mem_mi}}" }
+                - { name: replicas, value: "{{inputs.parameters.replicas}}" }
+                - { name: savings, value: "{{inputs.parameters.savings}}" }
+                - { name: policy_note, value: "{{inputs.parameters.policy_note}}" }
+        - - name: approve
+            template: approve
+        - - name: merge
+            template: merge
+            when: "{{steps.approve.outputs.parameters.approve}} == YES"
+            arguments:
+              parameters:
+                - { name: pr, value: "{{steps.open-pr.outputs.parameters.pr}}" }
+
+    # 1. Measure: usage vs request from Prometheus, price from OpenCost, headroom/floors from the policy ConfigMap.
+    - name: measure
+      activeDeadlineSeconds: 120
+      retryStrategy: { limit: "2", retryPolicy: OnTransientError }
+      outputs:
+        parameters:
+          - { name: cur_cpu_m,  valueFrom: { path: /tmp/cur_cpu_m } }
+          - { name: rec_cpu_m,  valueFrom: { path: /tmp/rec_cpu_m } }
+          - { name: peak_cpu_m, valueFrom: { path: /tmp/peak_cpu_m } }
+          - { name: cur_mem_mi, valueFrom: { path: /tmp/cur_mem_mi } }
+          - { name: rec_mem_mi, valueFrom: { path: /tmp/rec_mem_mi } }
+          - { name: peak_mem_mi, valueFrom: { path: /tmp/peak_mem_mi } }
+          - { name: replicas,   valueFrom: { path: /tmp/replicas } }
+          - { name: savings,    valueFrom: { path: /tmp/savings } }
+          - { name: change_pct, valueFrom: { path: /tmp/change_pct } }
+          - { name: blocked, valueFrom: { path: /tmp/blocked, default: "no" } }
+          - { name: reason, globalName: reason, valueFrom: { path: /tmp/reason, default: "" } }
+      script:
+        image: alpine/k8s:1.36.6
+        imagePullPolicy: IfNotPresent
+        resources: { requests: { cpu: 20m, memory: 64Mi } }
+        command: [bash]
+        source: |
+          set -euo pipefail
+          NS="{{workflow.parameters.namespace}}"; W="{{workflow.parameters.workload}}"; WIN="{{workflow.parameters.window}}"
+          PROM="{{workflow.parameters.prom}}"
+          q() { curl -sfG "$PROM/api/v1/query" --data-urlencode "query=$1" | jq -r '.data.result[0].value[1] // empty'; }
+          cm() { kubectl -n argo get cm finops-policy -o jsonpath="{.data.$1}"; }
+          HEADROOM=$(cm headroom); MINCPU=$(cm minCPU); MINMEM=$(cm minMemoryMi)
+          # a blocked measurement is a decision, not a crash: emit it so policy/onExit can report why
+          block() { echo "BLOCKED: $*" >&2; printf 'BLOCKED: %s' "$*" > /tmp/reason; printf yes > /tmp/blocked
+                    for f in cur_cpu_m rec_cpu_m peak_cpu_m cur_mem_mi rec_mem_mi peak_mem_mi replicas savings change_pct; do printf 0 > /tmp/$f; done; exit 0; }
+
+          REPLICAS=$(kubectl -n "$NS" get deploy "$W" -o jsonpath='{.spec.replicas}')
+          CUR_CPU=$(q "max(kube_pod_container_resource_requests{namespace=\"$NS\",container=\"$W\",resource=\"cpu\"})*1000")
+          CUR_MEM=$(q "max(kube_pod_container_resource_requests{namespace=\"$NS\",container=\"$W\",resource=\"memory\"})/1048576")
+          # peak per-pod usage over the window (cores / bytes); rate over 2m, sampled every 30s
+          PEAK_CPU=$(q "max(max_over_time((max by (pod)(rate(container_cpu_usage_seconds_total{namespace=\"$NS\",container=\"$W\"}[2m])))[$WIN:30s]))*1000")
+          PEAK_MEM=$(q "max(max_over_time((max by (pod)(container_memory_working_set_bytes{namespace=\"$NS\",container=\"$W\"}))[$WIN:30s]))/1048576")
+          SAMPLES=$(q "count_over_time((max(rate(container_cpu_usage_seconds_total{namespace=\"$NS\",container=\"$W\"}[2m])))[$WIN:30s])")
+          OOM=$(q "sum(kube_pod_container_status_last_terminated_reason{namespace=\"$NS\",container=\"$W\",reason=\"OOMKilled\"})")
+          [ -z "$PEAK_CPU" ] || [ -z "$CUR_CPU" ] && block "no usage signal for $NS/$W in the last $WIN (coverage ${SAMPLES:-0} samples)"
+          SAMPLES=${SAMPLES:-0}; [ "${SAMPLES%.*}" -lt 10 ] && block "signal coverage too low: ${SAMPLES%.*} samples in $WIN, need 10. Not enough evidence to touch requests."
+
+          # recommendation = peak * headroom, rounded up to 50m / 64Mi, floored by policy
+          REC_CPU=$(awk -v p="$PEAK_CPU" -v h="$HEADROOM" -v m="$MINCPU" 'BEGIN{r=int((p*h+49)/50)*50; if(r<m)r=m; print r}')
+          REC_MEM=$(awk -v p="$PEAK_MEM" -v h="$HEADROOM" -v m="$MINMEM" 'BEGIN{r=int((p*h+63)/64)*64; if(r<m)r=m; print r}')
+          # never lower memory on a container that has OOMKilled
+          if [ "${OOM:-0}" != "0" ] && [ "${OOM:-0}" != "" ]; then echo "note: OOMKilled seen, keeping memory request"; REC_MEM=${CUR_MEM%.*}; fi
+          [ "$REC_CPU" -gt "${CUR_CPU%.*}" ] && REC_CPU=${CUR_CPU%.*}     # never raise requests from this loop
+          [ "$REC_MEM" -gt "${CUR_MEM%.*}" ] && REC_MEM=${CUR_MEM%.*}
+
+          CPU_PRICE=$(q "avg(node_cpu_hourly_cost)"); RAM_PRICE=$(q "avg(node_ram_hourly_cost)")
+          CPU_PRICE=${CPU_PRICE:-0.04}; RAM_PRICE=${RAM_PRICE:-0.005}    # ponytail: fallback if OpenCost is down
+          SAVINGS=$(awk -v n="$REPLICAS" -v cc="$CUR_CPU" -v rc="$REC_CPU" -v cm="$CUR_MEM" -v rm="$REC_MEM" -v pc="$CPU_PRICE" -v pr="$RAM_PRICE" \
+            'BEGIN{printf "%.0f", n*((cc-rc)/1000*pc + (cm-rm)/1024*pr)*730}')
+          CHANGE=$(awk -v c="$CUR_CPU" -v r="$REC_CPU" 'BEGIN{printf "%.0f", (c-r)/c*100}')
+
+          printf '%s' "${CUR_CPU%.*}" > /tmp/cur_cpu_m;  printf '%s' "$REC_CPU" > /tmp/rec_cpu_m;  printf '%.1f' "$PEAK_CPU" > /tmp/peak_cpu_m
+          printf '%s' "${CUR_MEM%.*}" > /tmp/cur_mem_mi; printf '%s' "$REC_MEM" > /tmp/rec_mem_mi; printf '%.0f' "$PEAK_MEM" > /tmp/peak_mem_mi
+          printf '%s' "$REPLICAS" > /tmp/replicas; printf '%s' "$SAVINGS" > /tmp/savings; printf '%s' "$CHANGE" > /tmp/change_pct
+          printf '%s/%s x%s: cpu request %sm, peak %.1fm over %s -> recommend %sm (%s%% less)\n' "$NS" "$W" "$REPLICAS" "${CUR_CPU%.*}" "$PEAK_CPU" "$WIN" "$REC_CPU" "$CHANGE"
+          printf 'memory request %sMi, peak %.0fMi -> recommend %sMi\n' "${CUR_MEM%.*}" "$PEAK_MEM" "$REC_MEM"
+          printf 'price: cpu $%s/core-h, ram $%s/GiB-h -> saves $%s/month\n' "$CPU_PRICE" "$RAM_PRICE" "$SAVINGS"
+
+    # 2. Policy: freeze list, HPA ownership, deadband. Emits a decision; `block` turns BLOCKED into a failed workflow
+    #    (a failed step's outputs never become global outputs, so the reason must come from a step that succeeded).
+    - name: policy
+      inputs:
+        parameters: [{ name: cur_cpu_m }, { name: rec_cpu_m }, { name: change_pct }, { name: blocked }, { name: reason_in }]
+      outputs:
+        parameters:
+          - { name: decision, valueFrom: { path: /tmp/decision } }
+          - { name: note, valueFrom: { path: /tmp/note, default: "" } }
+          - { name: reason, globalName: reason, valueFrom: { path: /tmp/reason, default: "" } }
+      script:
+        image: alpine/k8s:1.36.6
+        imagePullPolicy: IfNotPresent
+        resources: { requests: { cpu: 20m, memory: 64Mi } }
+        command: [bash]
+        source: |
+          set -euo pipefail
+          NS="{{workflow.parameters.namespace}}"; W="{{workflow.parameters.workload}}"
+          cm() { kubectl -n argo get cm finops-policy -o jsonpath="{.data.$1}"; }
+          block() { echo "BLOCKED: $*" >&2; printf BLOCKED > /tmp/decision; printf 'BLOCKED: %s' "$*" > /tmp/reason; exit 0; }
+          [ "{{inputs.parameters.blocked}}" = "yes" ] && { printf BLOCKED > /tmp/decision; printf '%s' '{{inputs.parameters.reason_in}}' > /tmp/reason; echo "passing through: {{inputs.parameters.reason_in}}"; exit 0; }
+          FREEZE=$(cm freeze); MINCHANGE=$(cm minChangePct)
+          case ",$FREEZE," in *",$NS,"*) block "namespace $NS is under change freeze (finops-policy.freeze)";; esac
+          if kubectl -n "$NS" get hpa -o json | jq -e --arg w "$W" '.items[] | select(.spec.scaleTargetRef.name == $w)' >/dev/null; then
+            block "$NS/$W is HPA-managed; changing requests changes the HPA's utilization math. Retarget the HPA first."
+          fi
+          if [ "{{inputs.parameters.change_pct}}" -lt "$MINCHANGE" ]; then
+            printf SKIP > /tmp/decision; printf 'change {{inputs.parameters.change_pct}}%% is inside the %s%% deadband' "$MINCHANGE" > /tmp/note
+            echo "SKIP: $(cat /tmp/note)"; exit 0
+          fi
+          printf OPEN_PR > /tmp/decision
+          printf 'policy OK: not frozen, no HPA, change {{inputs.parameters.change_pct}}%% > %s%% deadband' "$MINCHANGE" > /tmp/note
+          cat /tmp/note; echo
+
+    # Fails the workflow on purpose so the run shows red and onExit fires; the reason already lives in a global output.
+    - name: block
+      inputs:
+        parameters: [{ name: reason }]
+      script:
+        image: alpine/k8s:1.36.6
+        imagePullPolicy: IfNotPresent
+        resources: { requests: { cpu: 20m, memory: 64Mi } }
+        command: [bash]
+        source: |
+          echo '{{inputs.parameters.reason}}' >&2
+          exit 1
+
+    # 3. Open a PR against the manifests repo through the Gitea API: one GET, one PUT (branch+commit), one POST. Idempotent per workload.
+    - name: open-pr
+      inputs:
+        parameters: [{ name: cur_cpu_m }, { name: rec_cpu_m }, { name: cur_mem_mi }, { name: rec_mem_mi }, { name: peak_cpu_m }, { name: peak_mem_mi }, { name: replicas }, { name: savings }, { name: policy_note }]
+      outputs:
+        parameters:
+          - { name: pr, valueFrom: { path: /tmp/pr } }
+          - { name: url, valueFrom: { path: /tmp/url } }
+      script:
+        image: alpine/k8s:1.36.6
+        imagePullPolicy: IfNotPresent
+        resources: { requests: { cpu: 20m, memory: 64Mi } }
+        env:
+          - { name: TOKEN, valueFrom: { secretKeyRef: { name: gitea-token, key: token } } }
+        command: [bash]
+        source: |
+          set -euo pipefail
+          NS="{{workflow.parameters.namespace}}"; W="{{workflow.parameters.workload}}"
+          G="{{workflow.parameters.gitea}}/api/v1/repos/{{workflow.parameters.repo}}"
+          H=(-H "Authorization: token $TOKEN" -H "Content-Type: application/json")
+          F="apps/$NS/$W.yaml"; BR="finops/rightsize-$NS-$W-$(date +%s)"
+
+          # idempotency: one open rightsizing PR per workload
+          EXISTING=$(curl -sf "${H[@]}" "$G/pulls?state=open&limit=50" | jq -r --arg t "finops: rightsize $NS/$W" '[.[] | select(.title | startswith($t))][0] // empty | .number')
+          if [ -n "$EXISTING" ]; then echo "open PR #$EXISTING already exists for $NS/$W"; printf '%s' "$EXISTING" > /tmp/pr
+            curl -sf "${H[@]}" "$G/pulls/$EXISTING" | jq -r .html_url > /tmp/url; exit 0; fi
+
+          curl -sf "${H[@]}" "$G/contents/$F?ref=main" > /tmp/f.json
+          jq -r .content /tmp/f.json | base64 -d > /tmp/f.yaml
+          yq -i "(.spec.template.spec.containers[] | select(.name == \"$W\") | .resources.requests.cpu) = \"{{inputs.parameters.rec_cpu_m}}m\" |
+                 (.spec.template.spec.containers[] | select(.name == \"$W\") | .resources.requests.memory) = \"{{inputs.parameters.rec_mem_mi}}Mi\"" /tmp/f.yaml
+          jq -n --arg c "$(base64 < /tmp/f.yaml | tr -d '\n')" --arg sha "$(jq -r .sha /tmp/f.json)" --arg br "$BR" \
+             --arg msg "finops: rightsize $NS/$W cpu {{inputs.parameters.cur_cpu_m}}m->{{inputs.parameters.rec_cpu_m}}m" \
+             '{content:$c, sha:$sha, branch:"main", new_branch:$br, message:$msg}' \
+          | curl -sf "${H[@]}" -X PUT "$G/contents/$F" -d @- > /dev/null
+
+          BODY=$(cat <<MD
+          ## Rightsizing proposal for \`$NS/$W\`
+
+          | | request today | observed peak ({{workflow.parameters.window}}) | proposed |
+          |---|---|---|---|
+          | CPU | {{inputs.parameters.cur_cpu_m}}m | {{inputs.parameters.peak_cpu_m}}m | **{{inputs.parameters.rec_cpu_m}}m** |
+          | Memory | {{inputs.parameters.cur_mem_mi}}Mi | {{inputs.parameters.peak_mem_mi}}Mi | **{{inputs.parameters.rec_mem_mi}}Mi** |
+
+          Replicas: {{inputs.parameters.replicas}} · Estimated savings: **\${{inputs.parameters.savings}}/month**
+
+          - Policy: {{inputs.parameters.policy_note}}
+          - Method: per-pod peak over the window × headroom from \`finops-policy\`, rounded up, floored. Limits untouched. Requests never raised by this loop.
+          - Evidence: Argo Workflow \`{{workflow.name}}\` · trigger fingerprint \`{{workflow.parameters.fingerprint}}\`
+          - Merging this PR lets Argo CD apply it. Nothing touches the cluster directly.
+          MD
+          )
+          jq -n --arg br "$BR" --arg t "finops: rightsize $NS/$W (cpu {{inputs.parameters.cur_cpu_m}}m->{{inputs.parameters.rec_cpu_m}}m, saves \${{inputs.parameters.savings}}/mo)" --arg b "$BODY" \
+             '{base:"main", head:$br, title:$t, body:$b}' \
+          | curl -sf "${H[@]}" -X POST "$G/pulls" -d @- > /tmp/pr.json
+          jq -r .number /tmp/pr.json | tr -d '\n' > /tmp/pr; jq -r .html_url /tmp/pr.json | tr -d '\n' > /tmp/url
+          echo "opened PR #$(cat /tmp/pr): $(cat /tmp/url)"
+
+    # 4. Approve: a human picks YES/NO in the Argo UI (or `argo resume`). The workflow deadline expires stale approvals.
+    - name: approve
+      suspend: {}
+      inputs:
+        parameters:
+          - { name: approve, default: "NO", enum: ["YES", "NO"], description: "Merge the rightsizing PR?" }
+      outputs:
+        parameters:
+          - { name: approve, valueFrom: { supplied: {} } }
+
+    # 5. Merge via the Gitea API. Argo CD picks up main within its reconciliation interval.
+    - name: merge
+      inputs:
+        parameters: [{ name: pr }]
+      script:
+        image: alpine/k8s:1.36.6
+        imagePullPolicy: IfNotPresent
+        resources: { requests: { cpu: 20m, memory: 64Mi } }
+        env:
+          - { name: TOKEN, valueFrom: { secretKeyRef: { name: gitea-token, key: token } } }
+        command: [bash]
+        source: |
+          set -euo pipefail
+          G="{{workflow.parameters.gitea}}/api/v1/repos/{{workflow.parameters.repo}}"
+          curl -sf -H "Authorization: token $TOKEN" -H "Content-Type: application/json" \
+            -X POST "$G/pulls/{{inputs.parameters.pr}}/merge" -d '{"Do":"squash","delete_branch_after_merge":true}'
+          echo "merged PR #{{inputs.parameters.pr}}; Argo CD will sync main"
+
+    # onExit: anything but Succeeded opens an issue in the repo (the offline stand-in for Slack).
+    - name: notify
+      script:
+        image: alpine/k8s:1.36.6
+        imagePullPolicy: IfNotPresent
+        resources: { requests: { cpu: 20m, memory: 64Mi } }
+        env:
+          - { name: TOKEN, valueFrom: { secretKeyRef: { name: gitea-token, key: token } } }
+        command: [bash]
+        source: |
+          set -euo pipefail
+          [ "{{workflow.status}}" = "Succeeded" ] && { echo "workflow succeeded, nothing to report"; exit 0; }
+          G="{{workflow.parameters.gitea}}/api/v1/repos/{{workflow.parameters.repo}}"
+          REASON='{{workflow.outputs.parameters.reason}}'
+          case '{{workflow.failures}}' in *"exceeded its deadline"*) REASON="approval window expired (workflow activeDeadlineSeconds). The PR is still open for humans; nothing was merged.";; esac
+          [ -n "$REASON" ] || REASON="workflow ended {{workflow.status}} (see the workflow for details)"
+          jq -n --arg t "Rightsizing blocked: {{workflow.parameters.namespace}}/{{workflow.parameters.workload}}" \
+                --arg b "**$REASON**
+
+          Argo Workflow \`{{workflow.name}}\` ended **{{workflow.status}}**. Trigger fingerprint: \`{{workflow.parameters.fingerprint}}\`.
+          No PR was opened; nothing changed in the cluster." \
+                '{title:$t, body:$b}' \
+          | curl -sf -H "Authorization: token $TOKEN" -H "Content-Type: application/json" -X POST "$G/issues" -d @- | jq -r '"opened issue #\(.number): \(.html_url)"'

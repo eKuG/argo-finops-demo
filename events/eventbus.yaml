@@ -1,0 +1,12 @@
+apiVersion: argoproj.io/v1alpha1
+kind: EventBus
+metadata:
+  name: default
+  namespace: argo-events
+spec:
+  jetstream:
+    version: latest
+    replicas: 3
+    containerTemplate: { imagePullPolicy: IfNotPresent }
+    reloaderContainerTemplate: { imagePullPolicy: IfNotPresent }
+    metricsContainerTemplate: { imagePullPolicy: IfNotPresent }

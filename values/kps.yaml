@@ -1,0 +1,45 @@
+# kube-prometheus-stack, trimmed for a single-node kind demo. Grafana off: Prometheus graphs + OpenCost UI carry the visuals.
+fullnameOverride: kps
+crds: { enabled: true }
+grafana: { enabled: false }
+defaultRules: { create: false }
+kubeEtcd: { enabled: false }
+kubeScheduler: { enabled: false }
+kubeControllerManager: { enabled: false }
+kubeProxy: { enabled: false }
+nodeExporter: { enabled: false }
+kube-state-metrics:
+  metricLabelsAllowlist: ["namespaces=[finops-guard]"]   # exposes kube_namespace_labels{label_finops_guard=...} for the opt-in gate
+prometheusOperator:
+  admissionWebhooks: { enabled: false }
+  tls: { enabled: false }
+prometheus:
+  service: { type: NodePort, nodePort: 30090 }
+  prometheusSpec:
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+    retention: 2h
+    ruleSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    resources: { requests: { cpu: 100m, memory: 400Mi } }
+alertmanager:
+  service: { type: NodePort, nodePort: 30093 }
+  config:
+    global: { resolve_timeout: 5m }
+    route:
+      receiver: "null"
+      group_by: [namespace, container]   # one group -> one webhook -> one workflow; alerts.0 is the right one
+      group_wait: 5s
+      group_interval: 30s
+      repeat_interval: 1h                 # otherwise the Sensor re-fires on every repeat
+      routes:
+        - receiver: finops
+          matchers: ["alertname = OverProvisioned"]
+    receivers:
+      - name: "null"
+      - name: finops
+        webhook_configs:
+          - url: http://alertmanager-eventsource-svc.argo-events.svc:12000/alerts
+            send_resolved: false          # the *resolved* notification after the merge must not re-trigger
+            max_alerts: 1

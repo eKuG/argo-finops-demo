@@ -1,0 +1,3 @@
+{"version":"4","status":"firing","receiver":"finops","groupLabels":{"namespace":"shop","container":"shop-api"},
+ "alerts":[{"status":"firing","labels":{"alertname":"OverProvisioned","namespace":"shop","container":"shop-api","severity":"cost","finops_action":"rightsize"},
+            "annotations":{"summary":"shop/shop-api uses 0.1% of its CPU request"},"fingerprint":"fake0001"}]}

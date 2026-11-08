@@ -1,0 +1,52 @@
+# SA for every step of the FinOps workflows. Executor needs workflowtaskresults; steps need read on workloads, the policy ConfigMap, and namespace delete for TTL cleanup.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: finops
+  namespace: argo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: finops-executor
+  namespace: argo
+rules:
+  - apiGroups: [argoproj.io]
+    resources: [workflowtaskresults]
+    verbs: [create, patch]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: finops-executor
+  namespace: argo
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: finops-executor }
+subjects: [{ kind: ServiceAccount, name: finops, namespace: argo }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: finops-steps
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: finops-steps
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: finops-steps }
+subjects: [{ kind: ServiceAccount, name: finops, namespace: argo }]

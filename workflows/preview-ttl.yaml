@@ -1,0 +1,42 @@
+# Idle-resource cleanup: preview environments carry an expiry; this deletes them when it passes.
+# Argo Workflows 4.x: `schedules` (plural). dry_run=true only lists.
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: preview-ttl
+  namespace: argo
+spec:
+  schedules: ["* * * * *"]
+  timezone: America/Denver
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 3
+  workflowSpec:
+    serviceAccountName: finops
+    entrypoint: sweep
+    activeDeadlineSeconds: 120
+    ttlStrategy: { secondsAfterCompletion: 3600 }
+    arguments:
+      parameters:
+        - { name: dry_run, value: "false" }
+    templates:
+      - name: sweep
+        script:
+          image: alpine/k8s:1.36.6
+          imagePullPolicy: IfNotPresent
+          command: [bash]
+          source: |
+            set -euo pipefail
+            now=$(date -u +%s)
+            kubectl get ns -l preview=true -o json \
+            | jq -r '.items[] | [.metadata.name, (.metadata.annotations["finops/expires-at"] // "")] | @tsv' \
+            | while IFS=$'\t' read -r ns exp; do
+                [ -z "$exp" ] && { echo "skip  $ns (no finops/expires-at)"; continue; }
+                exp_s=$(jq -rn --arg d "$exp" '$d | fromdateiso8601')
+                if [ "$exp_s" -le "$now" ]; then
+                  if [ "{{workflow.parameters.dry_run}}" = "true" ]; then echo "would delete  $ns (expired $exp)";
+                  else kubectl delete ns "$ns" --wait=false && echo "deleted  $ns (expired $exp)"; fi
+                else
+                  echo "keep  $ns (expires $exp)"
+                fi
+              done

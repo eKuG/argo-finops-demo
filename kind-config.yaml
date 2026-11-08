@@ -1,0 +1,14 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: finops
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.36.1
+    extraPortMappings:
+      - { containerPort: 30080, hostPort: 30080 }   # argocd-server
+      - { containerPort: 30746, hostPort: 30746 }   # argo-server (workflows UI)
+      - { containerPort: 30300, hostPort: 30300 }   # gitea
+      - { containerPort: 30090, hostPort: 30090 }   # prometheus
+      - { containerPort: 30093, hostPort: 30093 }   # alertmanager
+      - { containerPort: 30091, hostPort: 30091 }   # opencost-ui
+      - { containerPort: 30120, hostPort: 30120 }   # argo-events webhook eventsource
