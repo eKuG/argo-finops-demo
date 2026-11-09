@@ -41,7 +41,7 @@ shop-api (3 × 2000m request, ~2m used)  ──cAdvisor/KSM──▶  Prometheus
 |---|---|---|
 | Hook | `make demo-hook` | `kubectl set resources` → Argo CD selfHeal reverts it within ~10 s |
 | A | `make demo-arm` | `kubectl label ns shop finops-guard=on` → alert → Sensor → Workflow → PR in Gitea with evidence (~50–65 s) |
-| B | Argo UI → Resume → YES (or `make demo-approve`) | Merge → Argo CD sync → Prometheus $ run-rate drops |
+| B | Argo UI: click the yellow `approve` node → **RESUME at the bottom of the node panel** → Modify parameters: `approve` NO → **YES** → OK (or `make demo-approve`). The top-bar RESUME resumes with NO and skips the merge. | Merge → Argo CD sync → Prometheus $ run-rate drops |
 | C | `make demo-block` | Same template on `payments` → policy freeze → workflow fails → Gitea issue |
 | D | `make demo-ttl` | CronWorkflow deleting expired `preview-pr-*` namespaces |
 
